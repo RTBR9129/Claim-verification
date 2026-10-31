@@ -1,17 +1,28 @@
-
 # Python
 __pycache__/
 *.py[cod]
+*.pyd
 .venv/
 venv/
+env/
 
 # Large dataset and generated data
 data/feverous-wiki-pages.zip
 data/*.jsonl
 data/*.npy
+data/*.json
+data/*.txt
 
 # Secrets
 .env
+.env.*
 
 # Editor settings
 .vscode/
+
+# Operating system
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
