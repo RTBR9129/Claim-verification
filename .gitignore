@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 env/
+models/
+*.joblib
 
 # Large dataset and generated data
 data/feverous-wiki-pages.zip
@@ -12,6 +14,10 @@ data/*.jsonl
 data/*.npy
 data/*.json
 data/*.txt
+data/*.sqlite3
+data/*.building.sqlite3
+data/*.index
+data/*.faiss
 
 # Secrets
 .env
