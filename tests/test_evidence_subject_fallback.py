@@ -1,4 +1,4 @@
-"""Regression checks for the title fallback in evidence selection."""
+"""Regression checks for evidence selection and compound claims."""
 
 import sys
 import unittest
@@ -46,4 +46,51 @@ class SubjectFallbackTest(unittest.TestCase):
         self.assertEqual(evidence[0]["nli_basis"], "No claim-matching sentence found.")
         self.assertEqual(scores[0]["neutral"], 1.0)
         self.assertEqual(self.pipeline.nli.predict.call_args.args[0], [])
+
+    def test_unmatched_retrieved_passage_keeps_display_metadata(self):
+        self.pipeline.is_calibrated = False
+        self.pipeline.retrieve = Mock(return_value=[
+            {"title": "Shulan", "text": "Shulan is a city in China.", "chunk_id": 0},
+        ])
+
+        result = self.pipeline.verify("Shulin, which was reorganized, is located in China.")
+
+        self.assertEqual(result["label"], "NOT ENOUGH INFO")
+        self.assertEqual(result["evidence"][0]["relation"], "unrelated")
+        self.assertEqual(result["evidence"][0]["nli"]["neutral"], 1.0)
+
+
+class CompoundClaimTest(unittest.TestCase):
+    def test_checks_each_part_and_cites_the_school_sentence(self):
+        pipeline = EvidencePipeline.__new__(EvidencePipeline)
+        pipeline.nli = Mock()
+        pipeline.nli.model.config.id2label = {0: "contradiction", 1: "entailment", 2: "neutral"}
+        pipeline.nli.predict.return_value = np.array([[-5.0, 5.0, -2.0], [-5.0, 5.0, -2.0]])
+        claim = (
+            "Peter Example, an avant-garde filmmaker, was born in Vienna, Austria "
+            "but did not qualify academically for the Primary School in Mistelbach."
+        )
+        school = "He attended the Primary School in Mistelbach from 1965 to 1969."
+        evidence = [{
+            "title": "Peter Example",
+            "chunk_id": 0,
+            "text": "Peter Example is an avant-garde filmmaker. "
+                    "Peter Example was born in Vienna, Austria. " + school,
+        }]
+
+        checks = pipeline.check_compound_claim(claim, evidence)
+
+        self.assertEqual([check["label"] for check in checks], [
+            "SUPPORTS", "SUPPORTS", "NOT ENOUGH INFO",
+        ])
+        self.assertIn("did not qualify academically", checks[2]["claim"])
+        self.assertEqual(checks[2]["sentence"], school)
+        self.assertEqual(len(pipeline.nli.predict.call_args.args[0]), 2)
+
+    def test_does_not_split_a_simple_claim_or_a_coordination_with_a_different_subject(self):
+        for claim in (
+            "Peter Example was born in Vienna and raised in Graz.",
+            "Peter Example was born in Vienna, but Mary Example was born in Graz.",
+        ):
+            self.assertEqual(EvidencePipeline._compound_parts(claim, "Peter Example"), [])
 

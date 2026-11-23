@@ -296,25 +296,7 @@ class EvidencePipeline:
                     owners.append(owner)
                     pair_weights.append(0.5 + overlap / max(1, len(claim_terms)))
                     pair_texts.append(excerpt)
-        logits = np.asarray(
-            self.nli.predict(pairs, batch_size=16, show_progress_bar=False)
-        )
-        if logits.ndim == 1:
-            logits = logits.reshape(-1, 1)
-        id2label = getattr(getattr(self.nli, "model", None), "config", None)
-        id2label = getattr(id2label, "id2label", {}) or {}
-        labels = {str(name).upper(): int(index) for index, name in id2label.items()}
-        indices = {
-            "refutes": next((v for k, v in labels.items() if "CONTRAD" in k), 0),
-            "supports": next((v for k, v in labels.items() if "ENTAIL" in k), 1),
-            "neutral": next((v for k, v in labels.items() if "NEUTRAL" in k), 2),
-        }
-        logits = logits[:, :3].astype(np.float64)
-        temperature = 1.0
-        scaled = logits / temperature
-        scaled -= scaled.max(axis=1, keepdims=True)
-        probabilities = np.exp(scaled)
-        probabilities /= probabilities.sum(axis=1, keepdims=True)
+        probabilities, indices = self._score_pairs(pairs)
         selected: list[int | None] = [None] * len(evidence)
         selected_scores = [-1.0] * len(evidence)
         for row, owner in enumerate(owners):
@@ -336,6 +318,103 @@ class EvidencePipeline:
                 if index < probabilities.shape[1]
             })
             evidence[owner]["nli_basis"] = pair_texts[row]
+        return results
+
+    def _score_pairs(self, pairs: list[tuple[str, str]]) -> tuple[np.ndarray, dict[str, int]]:
+        logits = np.asarray(self.nli.predict(pairs, batch_size=16, show_progress_bar=False))
+        if not pairs:
+            return np.empty((0, 3)), {}
+        if logits.ndim == 1:
+            logits = logits.reshape(1, -1)
+        config = getattr(getattr(self.nli, "model", None), "config", None)
+        labels = {str(name).upper(): int(index) for index, name in (
+            getattr(config, "id2label", {}) or {}
+        ).items()}
+        indices = {
+            "refutes": next((v for k, v in labels.items() if "CONTRAD" in k), 0),
+            "supports": next((v for k, v in labels.items() if "ENTAIL" in k), 1),
+            "neutral": next((v for k, v in labels.items() if "NEUTRAL" in k), 2),
+        }
+        scaled = logits[:, :3].astype(np.float64)
+        scaled -= scaled.max(axis=1, keepdims=True)
+        probabilities = np.exp(scaled)
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
+        return probabilities, indices
+
+    @staticmethod
+    def _compound_parts(claim: str, title: str) -> list[str]:
+        # Restrict the split to a shared subject anchored by a retrieved page title.
+        subject = re.match(rf"^{re.escape(title)}(?=\s|,)", claim, re.IGNORECASE)
+        if not subject:
+            return []
+        body = claim[subject.end():].strip().rstrip(".!?")
+        parts = re.split(
+            r",?\s+(?:but|and)\s+(?=(?:did|does|do|was|were|is|are|has|have|had)\b)",
+            body, maxsplit=2, flags=re.IGNORECASE,
+        )
+        if len(parts) < 2:
+            return []
+        role = re.match(r"^,\s*(a[n]?\s+[^,]{1,95}),\s*(.+)$", parts[0], re.IGNORECASE)
+        if role:
+            parts = [f"is {role[1]}", role[2], *parts[1:]]
+        elif parts[0].startswith(","):
+            return []
+        return [f"{subject[0]} {part.strip()}." for part in parts if part.strip()]
+
+    def check_compound_claim(
+        self, claim: str, evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Check simple coordinated clauses against complete sentences on the subject page."""
+        titles = {item["title"] for item in evidence if item.get("title")}
+        for title in sorted(titles, key=lambda name: (-len(name), name)):
+            clauses = self._compound_parts(claim, title)
+            if clauses:
+                break
+        else:
+            return []
+
+        subject_pages = [item for item in evidence if item["title"].casefold() == title.casefold()]
+        stops = set("a an the is was were are has have had do does did for in of to by not".split())
+
+        def terms(text: str) -> set[str]:
+            return set(TOKEN_RE.findall(text.casefold())) - stops
+
+        sentences = []
+        for item in subject_pages:
+            text = re.sub(r"\s+", " ", item["text"]).strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", text):
+                if sentence and len(sentence) <= 700:
+                    sentences.append((item, sentence, terms(sentence)))
+
+        results = []
+        pairs = []
+        checks_to_score = []
+        for clause in clauses:
+            keywords = terms(clause[len(title):])
+            check = {"claim": clause, "label": "NOT ENOUGH INFO"}
+            results.append(check)
+            if not sentences or not keywords:
+                continue
+            item, sentence, tokens = max(sentences, key=lambda candidate: len(keywords & candidate[2]))
+            overlap = len(keywords & tokens)
+            if not overlap:
+                continue
+            check.update(title=item["title"], chunk_id=item["chunk_id"], sentence=sentence)
+            # A negative clause needs enough coverage of the disputed detail.
+            # For example, attendance alone should not settle academic eligibility.
+            if re.search(r"\b(?:not|never|no)\b", clause[len(title):], re.IGNORECASE):
+                if overlap / len(keywords) < 2 / 3:
+                    check["note"] = "The passage leaves some details of this part unaddressed."
+                    continue
+            pairs.append((f"{item['title']}. {sentence}", clause))
+            checks_to_score.append(check)
+
+        if pairs:
+            scores, indices = self._score_pairs(pairs)
+            for check, row in zip(checks_to_score, scores):
+                relation = max(indices, key=lambda name: row[indices[name]])
+                if relation in {"supports", "refutes"} and row[indices[relation]] >= 0.7:
+                    check["label"] = relation.upper()
         return results
 
     @staticmethod
@@ -364,6 +443,9 @@ class EvidencePipeline:
             index for index, item in enumerate(evidence)
             if item.get("nli_basis") != "No claim-matching sentence found."
         ]
+        for index, (item, scores) in enumerate(zip(evidence, probabilities)):
+            item["nli"] = scores
+            item["relation"] = max(scores, key=scores.get) if index in active_indices else "unrelated"
         if not active_indices:
             return {
                 "label": "NOT ENOUGH INFO", "confidence": 0.0,
@@ -398,10 +480,6 @@ class EvidencePipeline:
                 "supports": float(calibrated[1]),
                 "neutral": float(calibrated[2]),
             }
-        for index, (item, scores) in enumerate(zip(evidence, probabilities)):
-            item["nli"] = scores
-            item["relation"] = max(scores, key=scores.get) if index in active_indices else "unrelated"
-
         supporting = aggregated["supports"]
         refuting = aggregated["refutes"]
         conflict = min(supporting, refuting)
@@ -414,10 +492,14 @@ class EvidencePipeline:
         else:
             label = "SUPPORTS" if supporting > refuting else "REFUTES"
         confidence = strongest if label != "NOT ENOUGH INFO" else max(aggregated.values())
-        human_review = (
-            label == "NOT ENOUGH INFO" or confidence < 0.65
-            or (supporting >= 0.25 and refuting >= 0.25)
-        )
+        low_confidence = confidence < 0.65
+        conflicting_scores = supporting >= 0.25 and refuting >= 0.25
+        human_review = label == "NOT ENOUGH INFO" or low_confidence or conflicting_scores
+        review_reason = None
+        if conflicting_scores:
+            review_reason = "The evidence model found signals both for and against the claim."
+        elif low_confidence:
+            review_reason = "The leading evidence score is below the review cutoff of 65%."
 
         claim_entities = self._entity_terms(claim)
         graph = {
@@ -443,6 +525,7 @@ class EvidencePipeline:
             "human_review": human_review,
             "evidence": evidence,
             "nli_aggregate": aggregated,
+            "review_reason": review_reason,
             "graph": graph,
             "explanation": explanation,
             "calibration": self.calibration_status,
@@ -490,7 +573,14 @@ def verify_claim_pipeline(
     global _PIPELINE
     if _PIPELINE is None:
         _PIPELINE = EvidencePipeline(lexical_retrieve)
-    return _PIPELINE.verify(claim, top_k)
+    result = _PIPELINE.verify(claim, top_k)
+    clause_checks = _PIPELINE.check_compound_claim(claim, result["evidence"])
+    if clause_checks:
+        result["clause_checks"] = clause_checks
+        result["human_review"] = result["human_review"] or any(
+            check["label"] != "SUPPORTS" for check in clause_checks
+        )
+    return result
 
 
 def reset_pipeline_for_calibration(

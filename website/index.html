@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claim Verifier</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner"><span class="brand-icon" aria-hidden="true">✓</span> Claim Verifier</div>
+  </header>
+  <main>
+    <nav aria-label="Verification steps" class="steps">
+      <span id="step-input" aria-current="step">1 &nbsp; Enter claim</span>
+      <span class="step-divider" aria-hidden="true"></span>
+      <span id="step-result">2 &nbsp; See result</span>
+    </nav>
+
+    <section id="input-screen" aria-labelledby="input-title">
+      <h1 id="input-title">Enter a claim</h1>
+      <p>Write your own statement or load a random one.</p>
+      <form id="claim-form" class="card">
+        <label for="claim">Your claim</label>
+        <textarea id="claim" required maxlength="1000" rows="4"
+                  placeholder="Tower of Glass is a novel by Robert Silverberg."></textarea>
+        <p class="help" id="input-message" role="status" aria-live="polite"></p>
+        <div class="actions">
+          <button id="check-button" type="submit">Check claim</button>
+          <button id="random-button" type="button" class="secondary">Pick a random claim</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="result-screen" aria-labelledby="result-title" hidden>
+      <h1 id="result-title" tabindex="-1">Review the result</h1>
+      <div class="card">
+        <p id="checked-claim" class="checked-claim"></p>
+        <div class="verdict"><span id="verdict" class="badge"></span><span>Evidence verdict</span></div>
+        <h2>Evidence scores</h2>
+        <p id="score-note" class="help"></p>
+        <div id="scores" class="scores"></div>
+        <div id="review" class="review" hidden>
+          <h2>Review recommended</h2>
+          <p id="parts-unavailable" hidden>Part-by-part check unavailable.</p>
+          <div id="parts" class="parts" hidden>
+            <div><h3>Resolved</h3><ul id="resolved-list"></ul></div>
+            <div><h3>Unresolved</h3><ul id="unresolved-list"></ul></div>
+          </div>
+        </div>
+      </div>
+      <div id="evidence" class="card evidence"></div>
+      <div class="actions result-actions">
+        <button id="show-more" class="secondary" aria-expanded="false" aria-controls="extra-evidence" hidden>Show more evidence</button>
+        <button id="back-button" class="text-button">Check another claim</button>
+      </div>
+      <div id="extra-evidence" hidden></div>
+    </section>
+  </main>
+</body>
+</html>

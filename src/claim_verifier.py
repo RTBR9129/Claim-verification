@@ -585,7 +585,7 @@ def train_model(max_claims: int, seed: int) -> None:
     print(f"Saved training report: {MODEL_INFO_FILE}")
 
 
-def verify_claim(claim: str, top_k: int) -> None:
+def verify_claim(claim: str, top_k: int, *, details: bool = False) -> None:
     import joblib
     from evidence_pipeline import verify_claim_pipeline
 
@@ -596,35 +596,80 @@ def verify_claim(claim: str, top_k: int) -> None:
         )
     classifier = joblib.load(SVM_MODEL_FILE)
     model_label = str(classifier.predict([claim])[0])
-    margins = classifier.decision_function([claim])[0]
     correction = load_label_corrections().get(normalize_claim(claim))
     final_label = correction["label"] if correction else model_label
 
     build_search_index()
     result = verify_claim_pipeline(claim, top_k, retrieve_evidence)
     evidence = result["evidence"]
+    evidence_label = result["label"]
+    clause_checks = result.get("clause_checks", [])
 
     print(f"\nClaim: {claim}")
-    print(f"Final label: {final_label}")
+    source = "manual correction" if correction else "prediction from claim text"
+    print(f"Final label: {final_label} ({source})")
     if correction:
         print(f"Applied manual correction: {correction['note']}")
+
+    evidence_summary = {
+        "SUPPORTS": "The retrieved passages support the claim.",
+        "REFUTES": "The retrieved passages contain evidence against the claim.",
+        "NOT ENOUGH INFO": "The retrieved passages do not settle the claim.",
+    }
+    print(f"Evidence check: {evidence_summary[evidence_label]}")
+    scores = result.get("nli_aggregate")
+    if scores:
+        ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        names = {"supports": "support", "refutes": "refute", "neutral": "neutral"}
+        print("Evidence scores: " + " | ".join(f"{score:.1%} {names[name]}" for name, score in ordered))
+    opposing_labels = {model_label, evidence_label} == {"SUPPORTS", "REFUTES"}
+    review_recommended = result["human_review"] or opposing_labels
+    print(f"Review recommended: {'yes' if review_recommended else 'no'}")
+    if opposing_labels:
+        print("Why: The claim model and the evidence check disagree.")
+    elif any(check["label"] == "NOT ENOUGH INFO" for check in clause_checks):
+        print("Why: The evidence does not settle every part of the claim.")
+    elif evidence_label == "NOT ENOUGH INFO":
+        print("Why: There is too little relevant evidence to settle the claim.")
+    elif review_recommended:
+        reason = result.get("review_reason") or "The evidence check is uncertain or found conflicting information."
+        print(f"Why: {reason}")
+
+    if clause_checks:
+        print("\nClaim parts:")
+        for check in clause_checks:
+            print(f"  {check['label']}: {check['claim']}")
+            if "sentence" in check:
+                print(f"    {check['title']}: {check['sentence']}")
+            if check.get("note"):
+                print(f"    {check['note']}")
+    elif not details:
+        excerpts = [item for item in evidence if item.get("relation") != "unrelated"][:2]
+        print("\nEvidence excerpts:")
+        if not excerpts:
+            print("  No retrieved passage matched the claim closely enough to use.")
+        for item in excerpts:
+            snippet = (item.get("nli_basis") or item["text"]).strip()
+            if len(snippet) > 320:
+                snippet = snippet[:320].rstrip() + "..."
+            print(f"  {item['title']}: {snippet}")
+
+    if details:
+        _print_verification_details(claim, classifier, model_label, result)
+
+
+def _print_verification_details(claim: str, classifier: Any, model_label: str, result: dict[str, Any]) -> None:
+    print("\nTechnical details:")
     print("Model: Word and character TF-IDF with a linear SVM")
     print(f"Claim-only model estimate: {model_label}")
     print("SVM decision scores (higher favors the label; scores are not probabilities):")
+    margins = classifier.decision_function([claim])[0]
     for class_label, margin in sorted(
         zip(classifier.classes_, margins), key=lambda pair: pair[1], reverse=True,
     ):
         print(f"  {class_label}: {margin:+.3f}")
     print(f"Evidence NLI estimate (advisory): {result['label']}")
     print(f"Evidence NLI confidence estimate: {result['confidence']:.1%} ({result['calibration']})")
-    directional_labels = {"SUPPORTS", "REFUTES"}
-    opposing_labels = {model_label, result["label"]} == directional_labels
-    review_recommended = result["human_review"] or opposing_labels
-    review_reason = " (claim model and evidence estimate give opposite labels)" if opposing_labels else ""
-    print(f"Review recommended: {'yes' if review_recommended else 'no'}{review_reason}")
-    print("Aggregated evidence relation scores:")
-    for relation, score in result.get("nli_aggregate", {}).items():
-        print(f"  {relation.upper()}: {score:.1%}")
     graph = result["graph"]
     print(
         "Evidence graph counts: "
@@ -632,9 +677,9 @@ def verify_claim(claim: str, top_k: int) -> None:
         f"neutral={graph['neutral']}"
     )
     print("\nRetrieved evidence:")
-    if not evidence:
+    if not result["evidence"]:
         print("  No matching passages found.")
-    for rank, item in enumerate(evidence, 1):
+    for rank, item in enumerate(result["evidence"], 1):
         print(
             f"\n{rank}. {item['title']} (chunk {item['chunk_id']}) "
             f"relation={item['relation'].upper()} "
@@ -645,16 +690,13 @@ def verify_claim(claim: str, top_k: int) -> None:
         if len(passage) > MAX_EVIDENCE_CHARS:
             passage = passage[:MAX_EVIDENCE_CHARS].rstrip() + " ... [truncated]"
         print(f"   {passage}")
-        print(
-            "   NLI: " + ", ".join(
-                f"{name}={score:.1%}" for name, score in item["nli"].items()
-            )
-        )
+        print("   NLI: " + ", ".join(
+            f"{name}={score:.1%}" for name, score in item["nli"].items()
+        ))
         if item.get("nli_basis"):
             print(f"   NLI basis: {item['nli_basis']}")
     print("\nEvidence explanation (advisory):")
     print(result["explanation"])
-    print("\nReview the retrieved passages before relying on the label.")
 
 
 def evaluate_end_to_end() -> None:
@@ -953,6 +995,7 @@ def main() -> int:
     verify_parser = subparsers.add_parser("verify", help="Predict a claim label and show retrieved evidence")
     verify_parser.add_argument("--claim", required=True, help="Claim text to check")
     verify_parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
+    verify_parser.add_argument("--details", action="store_true", help="Show model scores and full passages")
     subparsers.add_parser("evaluate", help="Evaluate the original logistic regression baseline on the validation split")
     calibrate_parser = subparsers.add_parser(
         "calibrate-hybrid", help="Fit temperature scaling on labeled training claims"
@@ -977,7 +1020,7 @@ def main() -> int:
         elif args.command == "verify":
             if not args.claim.strip() or args.top_k < 1:
                 parser.error("--claim must not be empty and --top-k must be >= 1")
-            verify_claim(args.claim.strip(), args.top_k)
+            verify_claim(args.claim.strip(), args.top_k, details=args.details)
         elif args.command == "evaluate":
             evaluate_end_to_end()
         elif args.command == "calibrate-hybrid":

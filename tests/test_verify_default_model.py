@@ -24,6 +24,7 @@ class VerifyDefaultModelTest(unittest.TestCase):
         evidence = {
             "label": "SUPPORTS",
             "confidence": 0.55,
+            "nli_aggregate": {"refutes": 0.211, "supports": 0.407, "neutral": 0.382},
             "calibration": "test calibration",
             "human_review": False,
             "evidence": [{
@@ -50,16 +51,24 @@ class VerifyDefaultModelTest(unittest.TestCase):
                 load_model.assert_called_once_with(path)
                 text = output.getvalue()
                 self.assertIn(f"Final label: {final_label}", text)
+                self.assertIn("Evidence check: The retrieved passages support the claim.", text)
+                self.assertIn("Review recommended: yes", text)
+                self.assertIn("Evidence scores: 40.7% support | 38.2% neutral | 21.1% refute", text)
+                self.assertIn("Why: The claim model and the evidence check disagree.", text)
+                self.assertIn("Example article: A passage for the audience to review.", text)
+                self.assertNotIn("SVM decision scores", text)
+                self.assertNotIn("Evidence graph counts", text)
+                self.assertEqual("Applied manual correction: Reviewed." in text, bool(corrections))
+
+                with redirect_stdout(io.StringIO()) as detailed:
+                    claim_verifier.verify_claim("An example.", 3, details=True)
+                text = detailed.getvalue()
+                self.assertIn("Technical details:", text)
                 self.assertIn("Claim-only model estimate: REFUTES", text)
                 self.assertIn("REFUTES: +0.400", text)
                 self.assertIn("scores are not probabilities", text)
                 self.assertIn("Evidence NLI estimate (advisory): SUPPORTS", text)
-                self.assertIn(
-                    "Review recommended: yes (claim model and evidence estimate give opposite labels)",
-                    text,
-                )
                 self.assertIn("Example article (chunk 0)", text)
-                self.assertEqual("Applied manual correction: Reviewed." in text, bool(corrections))
 
     def test_missing_default_model_reports_training_command_before_retrieval(self):
         path = Mock()

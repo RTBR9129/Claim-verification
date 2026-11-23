@@ -7,21 +7,40 @@ BM25 with MiniLM dense vectors, merges the rankings with reciprocal-rank
 fusion, reranks passages with a cross-encoder, and classifies claim-matching
 sentences with a three-way NLI model.
 
-The default verdict comes from a claim-only linear SVM using word and character
+The default command-line verdict comes from a claim-only linear SVM using word and character
 TF-IDF features. On 7,129 test claims it scored **63.4% accuracy** and **0.470
 macro F1**. On those same claims, the original logistic regression model
 scored **55.9%** and **0.423**. See the [test report](reports/word_character_svm_test.json) for
 the comparison and per-label results.
 
-The CLI displays raw SVM decision scores. Retrieved passages and the advisory
-NLI estimate help reviewers inspect the claim. The NLI temperature fit reached
-its search limit, so treat its confidence scores as provisional.
+The default command-line output shows the final label, the three evidence scores when
+available, and why a review is recommended when applicable. Evidence scores
+are model estimates. Add --details to verify or run.py to show SVM scores,
+calibration, graph counts, and longer passages.
 
 `label_corrections.jsonl` contains explicit reviewed exceptions. The CLI shows
 the model estimate and corrected final label when one matches. The Shulin
 correction follows the project convention that “Republic of China (Taiwan)”
 counts as “China”; this differs from labels on similar examples in the
 original training data.
+
+## Run the local website
+
+From the project folder in PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe .\website\server.py
+```
+
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000) in your browser. Type a
+claim or load a random one into the box, then click **Check claim**. The result
+shows one verdict from the evidence check, its scores when available, and one passage. Use
+**Show more evidence** for the remaining passages. Press Ctrl+C in PowerShell
+to stop the website.
+
+The website uses the existing Python models and local data. It starts in
+offline mode and reuses the model cache. The page is plain HTML, CSS, and
+JavaScript, with no additional web packages to install.
 
 ## Run the verifier
 
@@ -35,6 +54,18 @@ python -m pip install -r requirements.txt
 python src/claim_verifier.py index
 python src/claim_verifier.py verify --claim "Tower of Glass is a novel by Robert Silverberg."
 ```
+
+To pick a random claim from the local test set and print the verifier's verdict
+and evidence, run:
+
+```powershell
+.\.venv\Scripts\python.exe .\run.py
+```
+
+Add `--seed 42` to repeat the same selection.
+
+For simple compound claims about a named subject, the CLI also shows an
+advisory check and a relevant passage sentence for each part.
 
 If the default SVM artifact is missing, run the following from the project
 root. The second command trains the SVM and saves its test comparison against
